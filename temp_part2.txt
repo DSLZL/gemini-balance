@@ -1,0 +1,200 @@
+                (ErrorLog.error_type.ilike(f"%{error_search}%"))
+                | (ErrorLog.error_log.ilike(f"%{error_search}%"))
+            )
+        if start_date:
+            query = query.where(ErrorLog.request_time >= start_date)
+        if end_date:
+            query = query.where(ErrorLog.request_time < end_date)
+        if error_code_search:
+            try:
+                error_code_int = int(error_code_search)
+                query = query.where(ErrorLog.error_code == error_code_int)
+            except ValueError:
+                logger.warning(
+                    f"Invalid format for error_code_search: '{error_code_search}'. Expected an integer. Skipping error code filter."
+                )
+
+        sort_column = getattr(ErrorLog, sort_by, ErrorLog.id)
+        if sort_order.lower() == "asc":
+            query = query.order_by(asc(sort_column))
+        else:
+            query = query.order_by(desc(sort_column))
+
+        query = query.limit(limit).offset(offset)
+
+        result = await database.fetch_all(query)
+        return [dict(row) for row in result]
+    except Exception as e:
+        logger.exception(f"Failed to get error logs with filters: {str(e)}")
+        raise
+
+
+async def get_error_logs_count(
+    key_search: Optional[str] = None,
+    error_search: Optional[str] = None,
+    error_code_search: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> int:
+    """
+    获取符合条件的错误日志总数
+
+    Args:
+        key_search (Optional[str]): Gemini密钥搜索词 (模糊匹配)
+        error_search (Optional[str]): 错误类型或日志内容搜索词 (模糊匹配)
+        error_code_search (Optional[str]): 错误码搜索词 (精确匹配)
+        start_date (Optional[datetime]): 开始日期时间
+        end_date (Optional[datetime]): 结束日期时间
+
+    Returns:
+        int: 日志总数
+    """
+    try:
+        query = select(func.count()).select_from(ErrorLog)
+
+        if key_search:
+            query = query.where(ErrorLog.gemini_key.ilike(f"%{key_search}%"))
+        if error_search:
+            query = query.where(
+                (ErrorLog.error_type.ilike(f"%{error_search}%"))
+                | (ErrorLog.error_log.ilike(f"%{error_search}%"))
+            )
+        if start_date:
+            query = query.where(ErrorLog.request_time >= start_date)
+        if end_date:
+            query = query.where(ErrorLog.request_time < end_date)
+        if error_code_search:
+            try:
+                error_code_int = int(error_code_search)
+                query = query.where(ErrorLog.error_code == error_code_int)
+            except ValueError:
+                logger.warning(
+                    f"Invalid format for error_code_search in count: '{error_code_search}'. Expected an integer. Skipping error code filter."
+                )
+
+        count_result = await database.fetch_one(query)
+        return count_result[0] if count_result else 0
+    except Exception as e:
+        logger.exception(f"Failed to count error logs with filters: {str(e)}")
+        raise
+
+
+# 新增函数：获取单条错误日志详情
+async def get_error_log_details(log_id: int) -> Optional[Dict[str, Any]]:
+    """
+    根据 ID 获取单个错误日志的详细信息
+
+    Args:
+        log_id (int): 错误日志的 ID
+
+    Returns:
+        Optional[Dict[str, Any]]: 包含日志详细信息的字典，如果未找到则返回 None
+    """
+    try:
+        query = select(ErrorLog).where(ErrorLog.id == log_id)
+        result = await database.fetch_one(query)
+        if result:
+            # 将 request_msg (JSONB) 转换为字符串以便在 API 中返回
+            log_dict = dict(result)
+            if "request_msg" in log_dict and log_dict["request_msg"] is not None:
+                # 确保即使是 None 或非 JSON 数据也能处理
+                try:
+                    log_dict["request_msg"] = json.dumps(
+                        log_dict["request_msg"], ensure_ascii=False, indent=2
+                    )
+                except TypeError:
+                    log_dict["request_msg"] = str(log_dict["request_msg"])
+            return log_dict
+        else:
+            return None
+    except Exception as e:
+        logger.exception(f"Failed to get error log details for ID {log_id}: {str(e)}")
+        raise
+
+
+# 新增函数：通过 gemini_key / error_code / 时间窗口 查找最接近的错误日志
+async def find_error_log_by_info(
+    gemini_key: str,
+    timestamp: datetime,
+    status_code: Optional[int] = None,
+    window_seconds: int = 1,
+) -> Optional[Dict[str, Any]]:
+    """
+    在给定时间窗口内，根据 gemini_key（精确匹配）及可选的 status_code 查找最接近 timestamp 的错误日志。
+
+    假设错误日志的 error_code 存储的是 HTTP 状态码或等价错误码。
+
+    Args:
+        gemini_key: 完整的 Gemini key 字符串。
+        timestamp: 目标时间（UTC 或本地，与存储一致）。
+        status_code: 可选的错误码，若提供则优先匹配该错误码。
+        window_seconds: 允许的时间偏差窗口，单位秒，默认为 1 秒。
+
+    Returns:
+        Optional[Dict[str, Any]]: 最匹配的一条错误日志的完整详情（字段与 get_error_log_details 一致），若未找到则返回 None。
+    """
+    try:
+        start_time = timestamp - timedelta(seconds=window_seconds)
+        end_time = timestamp + timedelta(seconds=window_seconds)
+
+        base_query = select(ErrorLog).where(
+            ErrorLog.gemini_key == gemini_key,
+            ErrorLog.request_time >= start_time,
+            ErrorLog.request_time <= end_time,
+        )
+
+        # 若提供了状态码，先尝试按状态码过滤
+        if status_code is not None:
+            query = base_query.where(ErrorLog.error_code == status_code).order_by(
+                ErrorLog.request_time.desc()
+            )
+            candidates = await database.fetch_all(query)
+            if not candidates:
+                # 回退：不按状态码，仅按时间窗口
+                query2 = base_query.order_by(ErrorLog.request_time.desc())
+                candidates = await database.fetch_all(query2)
+        else:
+            query = base_query.order_by(ErrorLog.request_time.desc())
+            candidates = await database.fetch_all(query)
+
+        if not candidates:
+            return None
+
+        # 在 Python 中选择与 timestamp 最接近的一条
+        def _to_dict(row: Any) -> Dict[str, Any]:
+            d = dict(row)
+            if "request_msg" in d and d["request_msg"] is not None:
+                try:
+                    d["request_msg"] = json.dumps(
+                        d["request_msg"], ensure_ascii=False, indent=2
+                    )
+                except TypeError:
+                    d["request_msg"] = str(d["request_msg"])
+            return d
+
+        best = min(
+            candidates,
+            key=lambda r: abs((r["request_time"] - timestamp).total_seconds()),
+        )
+        return _to_dict(best)
+    except Exception as e:
+        logger.exception(
+            f"Failed to find error log by info (key=***{gemini_key[-4:] if gemini_key else ''}, code={status_code}, ts={timestamp}, window={window_seconds}s): {str(e)}"
+        )
+        raise
+
+
+async def delete_error_logs_by_ids(log_ids: List[int]) -> int:
+    """
+    根据提供的 ID 列表批量删除错误日志 (异步)。
+
+    Args:
+        log_ids: 要删除的错误日志 ID 列表。
+
+    Returns:
+        int: 实际删除的日志数量。
+    """
+    if not log_ids:
+        return 0
+    try:
+        # 使用 databases 执行删除
