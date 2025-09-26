@@ -171,7 +171,7 @@ This endpoint is directly forwarded to official OpenAI Compatible API format end
 | Configuration Item | Description | Default Value |
 | :--- | :--- | :--- |
 | **Database** | | |
-| `DATABASE_TYPE` | `mysql` or `sqlite` | `mysql` |
+| `DATABASE_TYPE` | `mysql` or `sqlite` or `postgres` | `mysql` |
 | `SQLITE_DATABASE` | Path for SQLite database file | `default_db` |
 | `MYSQL_HOST` | MySQL host address | `localhost` |
 | `MYSQL_SOCKET` | MySQL socket address | `/var/run/mysqld/mysqld.sock` |
