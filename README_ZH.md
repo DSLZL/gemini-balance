@@ -172,7 +172,7 @@ app/
 | 配置项 | 说明 | 默认值 |
 | :--- | :--- | :--- |
 | **数据库配置** | | |
-| `DATABASE_TYPE` | 数据库类型: `mysql` 或 `sqlite` | `mysql` |
+| `DATABASE_TYPE` | 数据库类型: `mysql`、`sqlite` 或 `postgres` | `mysql` |
 | `SQLITE_DATABASE` | 当使用 `sqlite` 时必填，SQLite 数据库文件路径 | `default_db` |
 | `MYSQL_HOST` | 当使用 `mysql` 时必填，MySQL 数据库主机地址 | `localhost` |
 | `MYSQL_SOCKET` | 可选，MySQL 数据库 socket 地址 | `/var/run/mysqld/mysqld.sock` |
